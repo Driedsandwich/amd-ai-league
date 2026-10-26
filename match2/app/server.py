@@ -21,8 +21,9 @@ from typing import Optional
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from mc2ocr import client, imaging, postprocess  # noqa: E402
+from mc2ocr import client, postprocess  # noqa: E402
 from mc2ocr.backend import make_backend  # noqa: E402
+from mc2ocr.lifecycle import process_lock  # noqa: E402
 from mc2ocr.prompt import MAX_NEW_TOKENS, build_prompt  # noqa: E402
 
 
@@ -69,6 +70,8 @@ def _margin() -> float:
 
 def read_one(backend, image_path: str, deadline_wall: Optional[float]) -> str:
     """画像 1 枚を読んで整えた文字を返す。締切（UNIX 秒）の margin 秒前までに生成を切る。"""
+    from mc2ocr import imaging  # acquire the lifetime lock before importing PIL/numpy
+
     def left() -> float:
         return float("inf") if deadline_wall is None else deadline_wall - time.time()
 
@@ -119,7 +122,7 @@ def handle(conn: socket.socket, backend) -> bool:
     return False
 
 
-def serve(sdir: Optional[str] = None) -> int:
+def _serve(sdir: str) -> int:
     sdir = os.path.abspath(sdir or state_dir())
     os.makedirs(sdir, exist_ok=True)
     ready = os.path.join(sdir, "ready")
@@ -180,6 +183,14 @@ def serve(sdir: Optional[str] = None) -> int:
             except OSError:
                 pass
     return 0
+
+
+def serve(sdir: Optional[str] = None) -> int:
+    sdir = os.path.abspath(sdir or state_dir())
+    with process_lock(sdir, "server") as lock:
+        if lock is None:
+            return 0
+        return _serve(sdir)
 
 
 if __name__ == "__main__":

@@ -16,6 +16,8 @@ import sys
 import time
 from pathlib import Path
 
+from mc2ocr.lifecycle import process_lock
+
 HERE = Path(__file__).resolve().parent
 _child = None
 _stop = False
@@ -51,7 +53,7 @@ def _cleanup_stale() -> None:
             pass
 
 
-def main() -> int:
+def _supervise() -> int:
     global _child
     signal.signal(signal.SIGTERM, _on_term)
     signal.signal(signal.SIGINT, _on_term)
@@ -85,5 +87,17 @@ def main() -> int:
     return 0
 
 
+def main(lock_fd=None) -> int:
+    sdir = os.environ.get("X052_STATE_DIR") or "/app/state"
+    with process_lock(sdir, "supervise", lock_fd) as lock:
+        if lock is None:
+            return 0
+        (Path(sdir) / "supervise.pid").write_text(str(os.getpid()))
+        return _supervise()
+
+
 if __name__ == "__main__":
-    raise SystemExit(main())
+    import argparse
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--lock-fd", type=int)  # app.py passes its already-held lock
+    raise SystemExit(main(parser.parse_args().lock_fd))

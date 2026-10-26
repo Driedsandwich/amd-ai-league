@@ -40,7 +40,8 @@ def test_write_output_shape_and_atomic_replace(short_dir, monkeypatch):
 
 
 def test_no_server_writes_empty_inside_budget_and_exits_zero(env, png):
-    env.update(X052_IMAGE_BUDGET="2.5", X052_READY_MARGIN="0.5")
+    env.update(X052_IMAGE_BUDGET="2.5", X052_READY_MARGIN="0.5",
+               X052_TEST_SUPERVISE_PYTHON="/nonexistent/mc2-python")
     r, dt = run_app(png, env)
     assert r.returncode == 0, r.stderr
     assert dt < 4.0, dt  # 締切（2.5 秒）の内
@@ -48,7 +49,8 @@ def test_no_server_writes_empty_inside_budget_and_exits_zero(env, png):
 
 
 def test_missing_image_still_writes_empty(env, short_dir):
-    env.update(X052_IMAGE_BUDGET="1.5", X052_READY_MARGIN="0.2")
+    env.update(X052_IMAGE_BUDGET="1.5", X052_READY_MARGIN="0.2",
+               X052_TEST_SUPERVISE_PYTHON="/nonexistent/mc2-python")
     r, dt = run_app(short_dir / "nope.png", env)
     assert r.returncode == 0
     assert read_json(Path(env["X052_OUTPUT_DIR"]) / "nope_output.json") == {"text": ""}
@@ -57,7 +59,8 @@ def test_missing_image_still_writes_empty(env, short_dir):
 def test_unwritable_output_dir_exits_zero(env, png, short_dir):
     blocker = short_dir / "afile"
     blocker.write_text("x")
-    env.update(X052_OUTPUT_DIR=str(blocker / "sub"), X052_IMAGE_BUDGET="1.2", X052_READY_MARGIN="0.1")
+    env.update(X052_OUTPUT_DIR=str(blocker / "sub"), X052_IMAGE_BUDGET="1.2", X052_READY_MARGIN="0.1",
+               X052_TEST_SUPERVISE_PYTHON="/nonexistent/mc2-python")
     r, _ = run_app(png, env)
     assert r.returncode == 0  # 書けなくても例外で落ちない
 
@@ -109,6 +112,7 @@ def test_waits_for_ready_then_answers(env, start_server, png):
     r, dt = run_app(png, env)
     assert read_json(Path(env["X052_OUTPUT_DIR"]) / "image_01_output.json") == {"text": "WAITED"}
     assert dt >= 1.5
+    assert not (sdir / "supervise.log").exists()
 
 
 def test_alarm_last_resort_writes_empty(env, start_server, png):

@@ -9,7 +9,7 @@
 
 環境変数: X052_IMAGE_BUDGET（始まりから数える絶対の締切・秒・既定 27）・X052_READY_MARGIN（常駐の ready を待つのは
 締切のこの秒前まで・既定 2）・X052_ALARM_S（最後の砦・既定 締切＋1）・X052_STATE_DIR（既定 /app/state）・
-X052_OUTPUT_DIR（既定 /app/output）。
+X052_OUTPUT_DIR（既定 /app/output）。X052_TEST_SUPERVISE_PYTHON は試験用の起動 Python 差し替え。
 """
 from __future__ import annotations
 
@@ -22,6 +22,7 @@ import argparse  # noqa: E402
 import json  # noqa: E402
 import os  # noqa: E402
 import signal  # noqa: E402
+import subprocess  # noqa: E402
 import sys  # noqa: E402
 from pathlib import Path  # noqa: E402
 
@@ -75,6 +76,28 @@ def write_output_safely(image_path: str, text: str) -> bool:
         return False
 
 
+def _start_supervisor(sdir: str, wait_until: float) -> None:
+    from mc2ocr import client
+    from mc2ocr.lifecycle import process_lock
+
+    # No waiting for another CLI, a loading server, or a supervisor in backoff.
+    with process_lock(sdir, "supervise") as supervisor_lock:
+        if supervisor_lock is None:
+            return
+        with process_lock(sdir, "server") as server_lock:
+            if server_lock is None or client.is_ready(sdir) or time.monotonic() >= wait_until:
+                return
+        # Release the server probe before the child can launch its server.
+        with open(Path(sdir) / "supervise.log", "ab", buffering=0) as log:
+            subprocess.Popen(
+                [os.environ.get("X052_TEST_SUPERVISE_PYTHON") or "python3",
+                 str(Path(__file__).resolve().with_name("supervise.py")),
+                 "--lock-fd", str(supervisor_lock.fileno())],
+                stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT,
+                start_new_session=True, pass_fds=(supervisor_lock.fileno(),),
+            )
+
+
 def run(image_path: str) -> None:
     budget = _envf("X052_IMAGE_BUDGET", 27)
     alarm_s = _envf("X052_ALARM_S", budget + 1)
@@ -96,6 +119,16 @@ def run(image_path: str) -> None:
 
         sdir = state_dir()
         wait_until = T0 + budget - ready_margin
+        if not client.is_ready(sdir) and time.monotonic() < wait_until:
+            # Even a stalled spawn must leave time to write the usual empty output.
+            startup_end = min(wait_until, T0 + budget, T0 + alarm_s)
+            signal.setitimer(signal.ITIMER_REAL, max(0.001, startup_end - time.monotonic()))
+            try:
+                _start_supervisor(sdir, wait_until)
+            except Exception:  # noqa: BLE001 - failed startup still uses the normal wait/deadline
+                pass
+            finally:
+                signal.setitimer(signal.ITIMER_REAL, max(0.001, T0 + alarm_s - time.monotonic()))
         while not client.is_ready(sdir) and time.monotonic() < wait_until:
             time.sleep(0.2)  # 常駐がまだ模型を読んでいる間は、締切の少し前まで待つ
         resp = client.read_image(sdir, str(Path(image_path).resolve()), deadline_wall)
