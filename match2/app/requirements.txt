@@ -1,0 +1,4 @@
+pillow>=10.0
+transformers>=4.57
+accelerate>=1.0
+# torch は書かない（主催の ROCm 基底像に入っている物を使う）
