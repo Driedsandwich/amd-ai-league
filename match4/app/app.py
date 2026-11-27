@@ -59,7 +59,7 @@ def answer_jobs(jobs, deadline):
     from m4agent.answer import fallback, model_result, prompt_for
     from m4agent.retrieval import gather
 
-    client.ensure_server()
+    waited_for_server = False
     for position, job in enumerate(jobs):
         # Batch mode shares the process deadline; every item already has a placeholder.
         remaining = deadline - time.monotonic()
@@ -75,9 +75,13 @@ def answer_jobs(jobs, deadline):
             publish(job, answer)
             if not passages:
                 continue
-            # Cold startup gets at most 250 ms; --index is the load/warmup phase.
+            # Share the cold-start wait across the entire question call.
             if not os.path.exists(client.socket_path()):
-                client.wait_ready(min(end - 1, time.monotonic() + 0.25))
+                if waited_for_server:
+                    continue
+                waited_for_server = True
+                if not client.wait_ready(min(end - 1, time.monotonic() + 0.25)):
+                    continue
             timeout = end - time.monotonic() - 1
             response = client.call({"op": "generate", "prompt": prompt_for(job["query"], passages, options),
                                     "max_new": 64, "max_time": max(0, timeout),
@@ -91,6 +95,11 @@ def answer_jobs(jobs, deadline):
 
 
 def work_jobs(jobs, deadline, args):
+    from m4agent import client
+
+    # The parent has published every placeholder before starting this worker.
+    if not os.path.exists(client.socket_path()):
+        client.ensure_server()
     if os.environ.get("X052_DIAG") == "1":
         from m4agent.diagnostic import claim_invocation, network_available, diagnostic_result
 

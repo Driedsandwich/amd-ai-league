@@ -41,6 +41,9 @@ selected for CPU tests; its sleep deliberately ignores generation time limits.
 
 ## CLI and outputs
 
+`main.py`, `agent.py`, `run.py`, `solve.py`, `predict.py`, and `inference.py`
+all call the same entry point as `app.py`.
+
 Questions accept `--query`, `--question`, `--task`, `--prompt`, `--q`, or
 positional text. Inline JSON and input files also accept `request`,
 `instruction`, `find`, and `text`. Start URLs accept `--url`, `--start-url`,
@@ -67,8 +70,8 @@ and `ITEM_ID`. A single input file supplies its stem when its object has no ID
 key with a usable value. IDs are made safe for filenames and deduplicated.
 When no candidates remain, the ID is `query`.
 
-Each ID receives `<id>_output.json` under `/app/output` or the given
-`--output-dir`. Additional directories may be supplied with `--output-dir`,
+Each ID receives identical `<id>_output.json` and `<id>.json` files under
+`/app/output` or the given `--output-dir`. Additional directories may be supplied with `--output-dir`,
 `--out-dir`, `--output_dir`, `--outdir`, or `--results-dir`. The flags
 `--output`, `--output-file`, `--out`, `--output-path`, `--result`, or
 `--result-file` add an exact `.json` file or another output directory. A shared
@@ -124,8 +127,8 @@ prices, numbers, counts, dates, years, versions, email, phone, URL, percentages,
 yes/no, and explicit name/other table or label values. Ambiguous ties refuse.
 The rule answer is saved before inference. A model request gets the remaining
 time minus one second; failure or malformed/ungrounded output retains the rule
-answer. Cold model startup is not awaited beyond 250 ms during a question.
-Production startup should therefore complete `--index` before questions.
+answer. After writing placeholders, a question with no server socket starts the
+resident supervisor in the background and waits up to 250 ms total for readiness.
 
 Prompts contain numbered passages, source paths/URLs and candidates. Model
 output is parsed from the first JSON object; answers must occur in the selected

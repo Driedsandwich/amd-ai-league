@@ -1,9 +1,11 @@
 """Review regressions; stdlib mocks exercise the GPU interface without torch."""
 import contextlib
 import http.client
+import io
 import json
 import os
 import stat
+import subprocess
 import sys
 import time
 import types
@@ -13,9 +15,13 @@ from unittest import mock
 
 from test_box import APP, Sandbox, QUESTION, PRICE, EMPTY, ID_FLAGS, QUERY_FLAGS
 import app as entry
-from m4agent import backend, diagnostic, retrieval
+from m4agent import backend, client, diagnostic, retrieval
 from m4agent.cli import jobs_from_args, parse_args
 from m4agent.common import atomic_json
+
+
+def output_paths(*ids, directory="output"):
+    return [f"{directory}/{item_id}{suffix}" for item_id in ids for suffix in ("_output.json", ".json")]
 
 
 class RetrievalRegressions(Sandbox):
@@ -45,35 +51,37 @@ class RetrievalRegressions(Sandbox):
 
 
 class OutputRegressions(Sandbox):
-    def assert_single_output(self, proc, expected_path):
-        files, rows = self.assert_outputs(proc, [expected_path])
-        self.assertEqual(rows, [files[expected_path]])
+    def assert_single_output(self, proc, item_id):
+        paths = output_paths(item_id)
+        files, rows = self.assert_outputs(proc, paths)
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(files, dict.fromkeys(paths, rows[0]))
         self.assertEqual(rows[0]["answer"], PRICE)
 
     def test_query_id_flag(self):
         self.start_server()
         proc, _ = self.run_app("--query-id", "find_01", "--query", QUESTION, "--corpus", str(self.site))
-        self.assert_single_output(proc, "output/find_01_output.json")
+        self.assert_single_output(proc, "find_01")
 
     def test_input_file_without_id_uses_stem(self):
         self.start_server()
         path = self.root / "find_01.json"
         path.write_text(json.dumps({"instruction": QUESTION, "link": (self.site / "prices.html").as_uri()}))
         proc, _ = self.run_app("--input", str(path))
-        self.assert_single_output(proc, "output/find_01_output.json")
+        self.assert_single_output(proc, "find_01")
 
     def test_find_id_and_unknown_question_and_url_flags(self):
         self.start_server()
         proc, _ = self.run_app("--find-id", "find_01", "--summary", "Some short text",
                                "--ask=" + QUESTION, "--target", (self.site / "prices.html").as_uri())
-        self.assert_single_output(proc, "output/find_01_output.json")
+        self.assert_single_output(proc, "find_01")
 
     def test_positional_input_file_uses_stem(self):
         self.start_server()
         path = self.root / "find_01.json"
         path.write_text(json.dumps({"text": QUESTION, "site": str(self.site / "prices.html")}))
         proc, _ = self.run_app(str(path))
-        self.assert_single_output(proc, "output/find_01_output.json")
+        self.assert_single_output(proc, "find_01")
 
     def test_directory_inputs_each_use_their_file_stem(self):
         self.start_server()
@@ -83,16 +91,17 @@ class OutputRegressions(Sandbox):
         (inputs / "find_01.json").write_text(json.dumps({"find": "", "name": "other"}))
         (inputs / "ignored.txt").write_text(json.dumps({"question": QUESTION}))
         proc, _ = self.run_app("--input-json", str(inputs), "--corpus", str(self.site))
-        paths = ["output/find_01_output.json", "output/find_02_output.json"]
+        paths = output_paths("find_01", "find_02")
         files, rows = self.assert_outputs(proc, paths)
-        self.assertEqual(rows, [files[path] for path in paths])
         self.assertEqual([row["answer"] for row in rows], ["", PRICE])
+        for item_id, row in zip(("find_01", "find_02"), rows):
+            self.assertEqual([files[path] for path in output_paths(item_id)], [row, row])
 
     def test_output_path_adds_exact_file(self):
         self.start_server()
         target = self.root / "some" / "dir" / "x.json"
         proc, _ = self.run_app("--query", QUESTION, "--corpus", str(self.site), "--output", str(target))
-        paths = ["output/query_output.json", "some/dir/x.json"]
+        paths = [*output_paths("query"), "some/dir/x.json"]
         files, rows = self.assert_outputs(proc, paths, [self.output, target.parent])
         self.assertEqual(len(rows), 1)
         self.assertEqual(files, dict.fromkeys(paths, rows[0]))
@@ -102,7 +111,7 @@ class OutputRegressions(Sandbox):
         self.start_server()
         proc, _ = self.run_app("--query", QUESTION, "--corpus", str(self.site),
                                env=dict(self.env, FIND_ID="find_01"))
-        self.assert_single_output(proc, "output/find_01_output.json")
+        self.assert_single_output(proc, "find_01")
 
     def test_all_id_candidates_fan_out_to_all_directory_aliases(self):
         self.start_server()
@@ -119,7 +128,7 @@ class OutputRegressions(Sandbox):
         ids = ["flag-id", "repeated", "word_123", "option_7",
                *(f"json-{letter}" for letter in "abcdefgh"), *(f"env-{letter}" for letter in "abcd")]
         directories = [self.output, *extra]
-        paths = [f"{directory.name}/{item_id}_output.json" for directory in directories for item_id in ids]
+        paths = [path for directory in directories for path in output_paths(*ids, directory=directory.name)]
         files, rows = self.assert_outputs(proc, paths, directories)
         self.assertEqual(len(rows), 1)
         self.assertEqual(files, dict.fromkeys(paths, rows[0]))
@@ -129,11 +138,28 @@ class OutputRegressions(Sandbox):
         extra = self.root / "extra"
         proc, _ = self.run_app("--query", "--find-id", "find_01", "--item-id", "find_02",
                                "--results-dir", str(extra))
-        files, rows = self.assert_outputs(proc, ["output/find_01_output.json", "output/find_02_output.json",
-                                                "extra/find_01_output.json", "extra/find_02_output.json"],
-                                        [self.output, extra])
+        paths = output_paths("find_01", "find_02") + output_paths("find_01", "find_02", directory="extra")
+        files, rows = self.assert_outputs(proc, paths, [self.output, extra])
         self.assertEqual(rows, [EMPTY])
         self.assertTrue(all(payload == EMPTY for payload in files.values()))
+
+    def test_entry_point_aliases_match_app(self):
+        self.start_server()
+        args = ("--query-id", "find_01", "--query", QUESTION, "--corpus", str(self.site))
+        baseline, _ = self.run_app(*args)
+        self.assert_single_output(baseline, "find_01")
+        expected = {path.name: path.read_bytes() for path in self.output.iterdir()}
+        for name in ("main", "agent", "run", "solve", "predict", "inference"):
+            with self.subTest(name=name):
+                for path in self.output.iterdir():
+                    path.unlink()
+                command = self.command(*args)
+                command[1] = str(APP / f"{name}.py")
+                proc = subprocess.run(command, env=self.env, capture_output=True, text=True, timeout=26)
+                self.assertEqual(proc.returncode, baseline.returncode, proc.stderr)
+                self.assertEqual(proc.stdout, baseline.stdout)
+                self.assertEqual(proc.stderr, baseline.stderr)
+                self.assertEqual({path.name: path.read_bytes() for path in self.output.iterdir()}, expected)
 
     def test_missing_option_values_still_publish_and_exit_zero(self):
         for flag in (*QUERY_FLAGS, "--url", "--corpus", "--input", "--index", "--output-dir"):
@@ -141,7 +167,8 @@ class OutputRegressions(Sandbox):
                 proc, _ = self.run_app("--id", "missing-value", flag)
                 self.assertEqual(self.saved("missing-value"), EMPTY)
                 self.assertEqual(json.loads(proc.stdout), EMPTY)
-                (self.output / "missing-value_output.json").unlink()
+                for path in output_paths("missing-value"):
+                    (self.root / path).unlink()
 
     def test_error_recovers_id_after_bad_flag_and_all_id_aliases(self):
         for flag in ID_FLAGS:
@@ -150,7 +177,8 @@ class OutputRegressions(Sandbox):
                     proc, _ = self.run_app("--query", *id_args)
                     self.assertEqual(self.saved("recovered"), EMPTY)
                     self.assertEqual(json.loads(proc.stdout), EMPTY)
-                    (self.output / "recovered_output.json").unlink()
+                    for path in output_paths("recovered"):
+                        (self.root / path).unlink()
 
     def test_missing_input_writes_named_or_default_refusal(self):
         for id_args, query_id in (([], "query"), (["--qid", "missing-batch"], "missing-batch")):
@@ -187,6 +215,49 @@ class OutputRegressions(Sandbox):
         self.assertEqual(json.loads(path.read_text()), EMPTY)
 
 
+class StartupRegressions(Sandbox):
+    def test_missing_socket_launches_once_after_placeholders_and_keeps_fallback(self):
+        batch = self.root / "batch.json"
+        batch.write_text(json.dumps([{"id": "first", "query_id": "alternate", "query": QUESTION},
+                                     {"id": "second", "query": QUESTION}]))
+        paths = [self.root / path for path in output_paths("first", "alternate", "second")]
+        launches = self.root / "launches.log"
+        waits = self.root / "waits.log"
+        wait_ready = client.wait_ready
+
+        # These logs record the calls made by the forked worker for the parent test.
+        def launch(command, **kwargs):
+            self.assertEqual(command, [sys.executable, str(APP / "supervise.py")])
+            self.assertTrue(kwargs["start_new_session"])
+            self.assertFalse(Path(self.sock).exists())
+            self.assertEqual([json.loads(path.read_text()) for path in paths], [EMPTY] * len(paths))
+            with launches.open("a") as log:
+                log.write("launch\n")
+            raise OSError("simulated launch failure")
+
+        def record_wait(deadline):
+            with waits.open("a") as log:
+                log.write(f"{deadline - time.monotonic()}\n")
+            return wait_ready(deadline)
+
+        argv = ["--input", str(batch), "--corpus", str(self.site), "--output-dir", str(self.output)]
+        stdout = io.StringIO()
+        started = time.monotonic()
+        with mock.patch.dict(os.environ, self.env, clear=True), contextlib.redirect_stdout(stdout), \
+             mock.patch.object(client.subprocess, "Popen", side_effect=launch), \
+             mock.patch.object(client, "wait_ready", side_effect=record_wait), \
+             mock.patch.object(entry, "process_started", return_value=started):
+            self.assertEqual(entry.main(argv), 0)
+        self.assertLess(time.monotonic() - started, 24)
+        self.assertEqual(launches.read_text().splitlines(), ["launch"])
+        wait, = map(float, waits.read_text().splitlines())
+        self.assertGreater(wait, 0)
+        self.assertLessEqual(wait, 0.25)
+        fallback = {"answer": PRICE, "citations": ["prices.html"], "confidence": 0.55}
+        self.assertEqual([json.loads(path.read_text()) for path in paths], [fallback] * len(paths))
+        self.assertEqual([json.loads(line) for line in stdout.getvalue().splitlines()], [fallback] * 2)
+
+
 class DiagnosticRegressions(Sandbox):
     def command(self, *args):
         # Keep the production locking and process boundaries, with a private counter and probe.
@@ -213,7 +284,7 @@ with patch.object(diagnostic, "network_available", return_value=0):
         url = (self.site / "prices.html").as_uri()
         path = self.root / "request.json"
         path.write_text(json.dumps({"question": QUESTION, "url": url, url: "secret contents"}))
-        paths = ["output/find_01_output.json", "output/item_2_output.json", "output/request_output.json"]
+        paths = output_paths("find_01", "item_2", "request")
         extra = "my private flag value"
         for call in range(3):
             proc, _ = self.run_app("--input", str(path), "--find-id", "find_01", "item_2",
@@ -238,8 +309,10 @@ with patch.object(diagnostic, "network_available", return_value=0):
         self.start_server()
         for env in (self.env, dict(self.env, X052_DIAG="0"), self.env):
             proc, _ = self.run_app("--query", QUESTION, "--corpus", str(self.site), env=env)
-            files, rows = self.assert_outputs(proc, ["output/query_output.json"])
-            self.assertEqual(rows, [files["output/query_output.json"]])
+            paths = output_paths("query")
+            files, rows = self.assert_outputs(proc, paths)
+            self.assertEqual(len(rows), 1)
+            self.assertEqual(files, dict.fromkeys(paths, rows[0]))
             self.assertEqual(rows[0]["answer"], PRICE)
         self.assertFalse((self.root / "diag.count").exists())
 
@@ -259,7 +332,9 @@ class ClockAndArgumentRegressions(unittest.TestCase):
         with mock.patch.dict(os.environ, clear=True):
             job, = jobs_from_args(parse_args(["--out-dir", "/alternate", "--find-id", "find_01"]))
         self.assertEqual(job["outputs"], [Path("/app/output/find_01_output.json"),
-                                          Path("/alternate/find_01_output.json")])
+                                          Path("/alternate/find_01_output.json"),
+                                          Path("/app/output/find_01.json"),
+                                          Path("/alternate/find_01.json")])
 
     def test_proc_clock_is_trusted_only_within_five_seconds(self):
         for delta in (-100, -0.01, 0, 0.01, 5, 5.01, 100000):

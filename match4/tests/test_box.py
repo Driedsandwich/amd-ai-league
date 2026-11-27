@@ -273,10 +273,10 @@ class IntegrationTests(Sandbox):
         entry = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(entry)
         argv = ["--query", QUESTION, "--corpus", str(self.site), "--output-dir", str(self.output)]
-        def hung(jobs, deadline):
+        def hung(jobs, deadline, args):
             time.sleep(60)
         started = time.monotonic()
-        with mock.patch.object(entry, "answer_jobs", hung), \
+        with mock.patch.object(entry, "work_jobs", hung), \
              mock.patch.object(entry, "process_started", return_value=time.monotonic() - 22), \
              mock.patch("builtins.print"):
             self.assertEqual(entry.main(argv), 0)

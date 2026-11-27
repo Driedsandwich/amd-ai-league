@@ -195,7 +195,8 @@ def jobs_from_args(args):
         if from_directory or not safe_ids(input_ids):
             input_ids = [stem]
         ids = safe_ids(args.command_ids + input_ids + word_and_env_ids) or ["query"]
-        outputs = [directory / (item_id + "_output.json")
+        outputs = [directory / (item_id + suffix)
+                   for suffix in ("_output.json", ".json")
                    for item_id in ids for directory in directories] + files
         file_item = item if args.files else {}
         jobs.append({"query": item_value(file_item, QUERY_KEYS) or args.query or "",
