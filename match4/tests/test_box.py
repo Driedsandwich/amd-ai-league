@@ -30,8 +30,7 @@ OTHER_PRICE = "$286.13"
 LAUNCH = "2087-06-19"
 FIXTURE_VALUES = [PRODUCT, PRICE, OTHER_PRODUCT, OTHER_PRICE, LAUNCH]
 QUESTION = "What is the price of " + PRODUCT + "?"
-EMPTY = {"answer": "", "citations": [], "confidence": 0.0,
-         "sources": [], "source_url": ""}
+EMPTY = {"answer": "", "citations": [], "confidence": 0.0}
 
 
 class QuietHandler(http.server.SimpleHTTPRequestHandler):
@@ -64,7 +63,8 @@ class Sandbox(unittest.TestCase):
                         X052_STUB_LOG=str(self.root / "prompts.log"),
                         PYTHONPATH=str(ROOT / "tests" / "guard"), PYTHONDONTWRITEBYTECODE="1",
                         NO_PROXY="127.0.0.1", no_proxy="127.0.0.1")
-        for key in ("X052_STUB_SLEEP", "X052_STUB_FAIL_LOAD", "X052_STUB_LOAD_SLEEP", "X052_TEST_NO_INET"):
+        for key in ("X052_STUB_SLEEP", "X052_STUB_FAIL_LOAD", "X052_STUB_LOAD_SLEEP", "X052_TEST_NO_INET",
+                    "X052_DIAG", "QUERY_ID", "FIND_ID", "TASK_ID", "ITEM_ID"):
             self.env.pop(key, None)
         self.processes = []
         self.http = None
@@ -125,6 +125,21 @@ class Sandbox(unittest.TestCase):
     def saved(self, query_id="query"):
         return json.loads((self.output / (query_id + "_output.json")).read_text())
 
+    def assert_outputs(self, proc, expected_paths, directories=None):
+        files = {path.relative_to(self.root).as_posix(): json.loads(path.read_text())
+                 for directory in directories or [self.output] for path in directory.rglob("*")
+                 if path.is_file()}
+        self.assertEqual(set(files), set(expected_paths))
+        rows = [json.loads(line) for line in proc.stdout.splitlines()]
+        self.assertTrue(rows)
+        for payload in [*files.values(), *rows]:
+            self.assertEqual(payload.keys(), EMPTY.keys())
+            self.assertIsInstance(payload["answer"], str)
+            self.assertIsInstance(payload["citations"], list)
+            self.assertTrue(all(isinstance(citation, str) for citation in payload["citations"]))
+            self.assertIsInstance(payload["confidence"], float)
+        return files, rows
+
 
 class IntegrationTests(Sandbox):
     def test_local_multihop_site_stub_and_resident_reuse(self):
@@ -137,8 +152,7 @@ class IntegrationTests(Sandbox):
             self.assertEqual(saved["answer"], PRICE)
             self.assertEqual(saved["citations"], [origin + "/prices.html"])
             self.assertEqual(saved["confidence"], 0.93)  # Proves the stub actually answered.
-            self.assertEqual(saved["sources"], saved["citations"])
-            self.assertEqual(saved["source_url"], saved["citations"][0])
+            self.assertEqual(saved.keys(), EMPTY.keys())
             self.assertEqual(json.loads(proc.stdout), saved)
             self.assertLess(elapsed, 26)
         with mock.patch.dict(os.environ, self.env):
@@ -233,15 +247,23 @@ class IntegrationTests(Sandbox):
                 release.wait(5)
 
         origin = self.start_http(Stalled)
-        proc = subprocess.Popen(self.command("--query", QUESTION, "--url", origin), env=self.env,
+        other_output = self.root / "other-output"
+        explicit = self.root / "explicit.json"
+        proc = subprocess.Popen(self.command("--query", QUESTION, "--url", origin,
+                                             "--query-id", "find_01", "--find-id", "find_02",
+                                             "--out-dir", str(other_output), "--output", str(explicit)),
+                                env=self.env,
                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
         self.processes.append(proc)
+        placeholders = [directory / f"{item_id}_output.json"
+                        for directory in (self.output, other_output) for item_id in ("find_01", "find_02")]
+        placeholders.append(explicit)
         try:
             self.assertTrue(entered.wait(3))
-            self.assertEqual(self.saved(), EMPTY)
+            self.assertEqual([json.loads(path.read_text()) for path in placeholders], [EMPTY] * 5)
             os.killpg(proc.pid, signal.SIGKILL)
             proc.wait(timeout=2)
-            self.assertEqual(self.saved(), EMPTY)
+            self.assertEqual([json.loads(path.read_text()) for path in placeholders], [EMPTY] * 5)
         finally:
             release.set()
 

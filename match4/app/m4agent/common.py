@@ -22,8 +22,7 @@ def result(answer="", citations=(), confidence=0.0):
     except (ValueError, TypeError):
         confidence = 0.0
     return {"answer": answer, "citations": citations,
-            "confidence": confidence if answer else 0.0,
-            "sources": citations, "source_url": citations[0] if citations else ""}
+            "confidence": confidence if answer else 0.0}
 
 
 def atomic_json(path, payload):

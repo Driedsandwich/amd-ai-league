@@ -11,10 +11,10 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from test_box import Sandbox, QUESTION, PRICE, EMPTY, ID_FLAGS, QUERY_FLAGS
+from test_box import APP, Sandbox, QUESTION, PRICE, EMPTY, ID_FLAGS, QUERY_FLAGS
 import app as entry
-from m4agent import backend, retrieval
-from m4agent.cli import parse_args
+from m4agent import backend, diagnostic, retrieval
+from m4agent.cli import jobs_from_args, parse_args
 from m4agent.common import atomic_json
 
 
@@ -45,6 +45,96 @@ class RetrievalRegressions(Sandbox):
 
 
 class OutputRegressions(Sandbox):
+    def assert_single_output(self, proc, expected_path):
+        files, rows = self.assert_outputs(proc, [expected_path])
+        self.assertEqual(rows, [files[expected_path]])
+        self.assertEqual(rows[0]["answer"], PRICE)
+
+    def test_query_id_flag(self):
+        self.start_server()
+        proc, _ = self.run_app("--query-id", "find_01", "--query", QUESTION, "--corpus", str(self.site))
+        self.assert_single_output(proc, "output/find_01_output.json")
+
+    def test_input_file_without_id_uses_stem(self):
+        self.start_server()
+        path = self.root / "find_01.json"
+        path.write_text(json.dumps({"instruction": QUESTION, "link": (self.site / "prices.html").as_uri()}))
+        proc, _ = self.run_app("--input", str(path))
+        self.assert_single_output(proc, "output/find_01_output.json")
+
+    def test_find_id_and_unknown_question_and_url_flags(self):
+        self.start_server()
+        proc, _ = self.run_app("--find-id", "find_01", "--summary", "Some short text",
+                               "--ask=" + QUESTION, "--target", (self.site / "prices.html").as_uri())
+        self.assert_single_output(proc, "output/find_01_output.json")
+
+    def test_positional_input_file_uses_stem(self):
+        self.start_server()
+        path = self.root / "find_01.json"
+        path.write_text(json.dumps({"text": QUESTION, "site": str(self.site / "prices.html")}))
+        proc, _ = self.run_app(str(path))
+        self.assert_single_output(proc, "output/find_01_output.json")
+
+    def test_directory_inputs_each_use_their_file_stem(self):
+        self.start_server()
+        inputs = self.root / "inputs"
+        inputs.mkdir()
+        (inputs / "find_02.json").write_text(json.dumps({"request": QUESTION, "id": "other"}))
+        (inputs / "find_01.json").write_text(json.dumps({"find": "", "name": "other"}))
+        (inputs / "ignored.txt").write_text(json.dumps({"question": QUESTION}))
+        proc, _ = self.run_app("--input-json", str(inputs), "--corpus", str(self.site))
+        paths = ["output/find_01_output.json", "output/find_02_output.json"]
+        files, rows = self.assert_outputs(proc, paths)
+        self.assertEqual(rows, [files[path] for path in paths])
+        self.assertEqual([row["answer"] for row in rows], ["", PRICE])
+
+    def test_output_path_adds_exact_file(self):
+        self.start_server()
+        target = self.root / "some" / "dir" / "x.json"
+        proc, _ = self.run_app("--query", QUESTION, "--corpus", str(self.site), "--output", str(target))
+        paths = ["output/query_output.json", "some/dir/x.json"]
+        files, rows = self.assert_outputs(proc, paths, [self.output, target.parent])
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(files, dict.fromkeys(paths, rows[0]))
+        self.assertEqual(rows[0]["answer"], PRICE)
+
+    def test_find_id_environment_variable(self):
+        self.start_server()
+        proc, _ = self.run_app("--query", QUESTION, "--corpus", str(self.site),
+                               env=dict(self.env, FIND_ID="find_01"))
+        self.assert_single_output(proc, "output/find_01_output.json")
+
+    def test_all_id_candidates_fan_out_to_all_directory_aliases(self):
+        self.start_server()
+        path = self.root / "ignored_stem.json"
+        path.write_text(json.dumps({"id": "json-a", "query_id": "json-b", "find_id": "json-c",
+                                    "task_id": "json-d", "qid": "json-e", "item_id": "json-f",
+                                    "request_id": "json-g", "name": "json-h", "prompt": QUESTION}))
+        extra = [self.root / name for name in ("out-dir", "output_dir", "outdir", "results-dir", "result")]
+        output_args = [arg for directory in extra for arg in ("--" + directory.name, str(directory))]
+        env = dict(self.env, QUERY_ID="env-a", FIND_ID="env-b", TASK_ID="env-c", ITEM_ID="env-d")
+        proc, _ = self.run_app("--id", "flag-id", "--task-id", "repeated", "--request-id=repeated",
+                               "--envelope", str(path), "word_123", "--opaque=option_7",
+                               "--corpus", str(self.site), *output_args, env=env)
+        ids = ["flag-id", "repeated", "word_123", "option_7",
+               *(f"json-{letter}" for letter in "abcdefgh"), *(f"env-{letter}" for letter in "abcd")]
+        directories = [self.output, *extra]
+        paths = [f"{directory.name}/{item_id}_output.json" for directory in directories for item_id in ids]
+        files, rows = self.assert_outputs(proc, paths, directories)
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(files, dict.fromkeys(paths, rows[0]))
+        self.assertEqual(rows[0]["answer"], PRICE)
+
+    def test_error_writes_empty_to_all_candidates(self):
+        extra = self.root / "extra"
+        proc, _ = self.run_app("--query", "--find-id", "find_01", "--item-id", "find_02",
+                               "--results-dir", str(extra))
+        files, rows = self.assert_outputs(proc, ["output/find_01_output.json", "output/find_02_output.json",
+                                                "extra/find_01_output.json", "extra/find_02_output.json"],
+                                        [self.output, extra])
+        self.assertEqual(rows, [EMPTY])
+        self.assertTrue(all(payload == EMPTY for payload in files.values()))
+
     def test_missing_option_values_still_publish_and_exit_zero(self):
         for flag in (*QUERY_FLAGS, "--url", "--corpus", "--input", "--index", "--output-dir"):
             with self.subTest(flag=flag):
@@ -97,7 +187,80 @@ class OutputRegressions(Sandbox):
         self.assertEqual(json.loads(path.read_text()), EMPTY)
 
 
+class DiagnosticRegressions(Sandbox):
+    def command(self, *args):
+        # Keep the production locking and process boundaries, with a private counter and probe.
+        wrapper = """
+import sys
+from unittest.mock import patch
+sys.path.insert(0, sys.argv.pop(1))
+import app
+from m4agent import diagnostic
+diagnostic.COUNTER_PATH = sys.argv.pop(1)
+with patch.object(diagnostic, "network_available", return_value=0):
+    raise SystemExit(app.main())
+"""
+        return [sys.executable, "-c", wrapper, str(APP), str(self.root / "diag.count"),
+                "--output-dir", str(self.output), *args]
+
+    def test_diagnostic_first_two_calls_only_and_keeps_values_private(self):
+        self.start_server()
+        env = dict(self.env, X052_DIAG="1")
+        index, _ = self.run_app("--index", str(self.site), env=env)
+        self.assertEqual(index.stdout, "")
+        self.assertFalse((self.root / "diag.count").exists())
+
+        url = (self.site / "prices.html").as_uri()
+        path = self.root / "request.json"
+        path.write_text(json.dumps({"question": QUESTION, "url": url, url: "secret contents"}))
+        paths = ["output/find_01_output.json", "output/item_2_output.json", "output/request_output.json"]
+        extra = "my private flag value"
+        for call in range(3):
+            proc, _ = self.run_app("--input", str(path), "--find-id", "find_01", "item_2",
+                                   "--corpus", str(self.site), "--future", extra, env=env)
+            files, rows = self.assert_outputs(proc, paths)
+            self.assertEqual(len(rows), 1)
+            self.assertEqual(files, dict.fromkeys(paths, rows[0]))
+            if call < 2:
+                self.assertEqual(rows[0], {
+                    "answer": "DIAG flags=--corpus,--find-id,--future,--input,--output-dir "
+                              "pos=1 inkeys=question,url url=file corpus=1 net=0",
+                    "citations": ["diag"], "confidence": 0.0,
+                })
+                for private in (QUESTION, url, str(path), str(self.site), extra,
+                                "secret contents", "find_01", "item_2"):
+                    self.assertNotIn(private, rows[0]["answer"])
+            else:
+                self.assertEqual(rows[0]["answer"], PRICE)
+        self.assertEqual((self.root / "diag.count").read_text(), "2")
+
+    def test_diagnostic_off_never_claims_a_slot(self):
+        self.start_server()
+        for env in (self.env, dict(self.env, X052_DIAG="0"), self.env):
+            proc, _ = self.run_app("--query", QUESTION, "--corpus", str(self.site), env=env)
+            files, rows = self.assert_outputs(proc, ["output/query_output.json"])
+            self.assertEqual(rows, [files["output/query_output.json"]])
+            self.assertEqual(rows[0]["answer"], PRICE)
+        self.assertFalse((self.root / "diag.count").exists())
+
+    def test_probe_uses_fixed_endpoint_and_one_second_timeout(self):
+        with mock.patch.object(diagnostic.socket, "socket") as opening:
+            conn = opening.return_value.__enter__.return_value
+            self.assertEqual(diagnostic.network_available(), 1)
+            opening.assert_called_once_with(diagnostic.socket.AF_INET, diagnostic.socket.SOCK_STREAM)
+            conn.settimeout.assert_called_once_with(1)
+            conn.connect.assert_called_once_with(("1.1.1.1", 443))
+            conn.connect.side_effect = TimeoutError
+            self.assertEqual(diagnostic.network_available(), 0)
+
+
 class ClockAndArgumentRegressions(unittest.TestCase):
+    def test_default_directory_is_used_without_output_dir_flag(self):
+        with mock.patch.dict(os.environ, clear=True):
+            job, = jobs_from_args(parse_args(["--out-dir", "/alternate", "--find-id", "find_01"]))
+        self.assertEqual(job["outputs"], [Path("/app/output/find_01_output.json"),
+                                          Path("/alternate/find_01_output.json")])
+
     def test_proc_clock_is_trusted_only_within_five_seconds(self):
         for delta in (-100, -0.01, 0, 0.01, 5, 5.01, 100000):
             with self.subTest(delta=delta):

@@ -41,45 +41,60 @@ selected for CPU tests; its sleep deliberately ignores generation time limits.
 
 ## CLI and outputs
 
-Question aliases: `--query`, `--question`, `--task`, `--prompt`, `--q`, or a
-positional question. A single positional JSON object accepts the same keys
-without the leading dashes.
+Questions accept `--query`, `--question`, `--task`, `--prompt`, `--q`, or
+positional text. Inline JSON and input files also accept `request`,
+`instruction`, `find`, and `text`. Start URLs accept `--url`, `--start-url`,
+`--start_url`, `--website`, `--site`, `--base-url`, and `--base_url`, plus
+`link` in JSON. If needed, the longest unknown-option value of at least three
+words supplies the question, and the first unknown-option value beginning with
+`http://`, `https://`, or `file://` supplies the URL. Corpus aliases are
+`--corpus`, `--sites`, `--pages`, `--web-root`, `--web_root`, and `--root`.
+An explicit corpus takes precedence over the start page. Local paths stay offline.
 
-ID aliases: `--query-id`, `--query_id`, `--id`, `--qid`, `--task-id`, `--task_id`.
-Missing ID becomes `query`. Normal harness IDs are preserved; path separators
-and other unsafe filename characters become underscores.
+Input flags are `--input`, `--input-file`, `--input-json`, `--request`,
+`--query-file`, `--question-file`, `--task-file`, `--find`, and `--find-file`.
+An existing file passed positionally or as an unknown option's value is also an
+input. Files accept a JSON object, an array of objects, or JSON Lines. A
+directory passed to an input flag supplies one item per `*.json` file in
+filename order, using each file's stem as its ID. Batch items share the
+invocation's 24-second budget and get proportional remaining time.
 
-Start aliases: `--url`, `--start-url`, `--start_url`, `--website`, `--site`,
-`--base-url`, `--base_url`. HTTP(S), local folders, local files and `file://`
-paths are supported.
+For each item, IDs come from the existing ID flags, other long flags containing
+`id`, the JSON keys `id`, `query_id`, `find_id`, `task_id`, `qid`, `item_id`,
+`request_id`, and `name`, then matching command-line words or flag values such
+as `find_01`, and the environment variables `QUERY_ID`, `FIND_ID`, `TASK_ID`,
+and `ITEM_ID`. A single input file supplies its stem when its object has no ID
+key with a usable value. IDs are made safe for filenames and deduplicated.
+When no candidates remain, the ID is `query`.
 
-Folder aliases: `--corpus`, `--sites`, `--pages`, `--web-root`, `--web_root`,
-`--root`. Explicit corpus takes precedence over the start page. A missing
-local path still stays offline. Unknown long flags and their directly following
-value are ignored; abbreviation is off. A question flag suppresses all positional
-text, including when its value is empty.
+Each ID receives `<id>_output.json` under `/app/output` or the given
+`--output-dir`. Additional directories may be supplied with `--output-dir`,
+`--out-dir`, `--output_dir`, `--outdir`, or `--results-dir`. The flags
+`--output`, `--output-file`, `--out`, `--output-path`, `--result`, or
+`--result-file` add an exact `.json` file or another output directory. A shared
+destination in a batch can be overwritten by later items.
+
+All destinations get an empty placeholder before retrieval or inference.
+Writes use atomic replacement and mode 0644. The final result is also emitted
+as one stdout line per item. Files and stdout carry exactly `answer` as a
+string, `citations` as an array of strings, and `confidence` as a number. Input
+and top-level errors publish empty results and exit zero.
+
+With `X052_DIAG=1`, a lock-protected counter at `/tmp/x052_m4_diag.count`
+reserves diagnostics for the first two question invocations. Indexing skips
+the counter. Each diagnostic answer starts with `DIAG` and records sorted
+identifier-like long option names and input keys, the positional argument count,
+the start URL scheme, whether a corpus was supplied, and the result of a
+one-second TCP probe to `1.1.1.1:443`. Diagnostics use `["diag"]` for citations
+and zero confidence. Question text, file contents, full URLs, and argument
+values are omitted apart from the URL scheme. Subsequent calls answer normally.
 
 `--index <folder>` parses HTML, HTM, TXT, MD and JSON files, catches per-file
 failures, writes a compact JSON index under `/app/index/`, starts the resident
 server, waits up to eight minutes for readiness, and exits zero. Indexes are
-keyed by the resolved corpus root and reused as snapshots; rerun `--index` if
+keyed by the resolved corpus root and reused as snapshots. Rerun `--index` if
 the corpus changes. Symlinks outside the corpus root are skipped. Files are
 bounded to 1.5 MB of text each, including offline files.
-
-`--input <file.json|file.jsonl>` accepts a list or JSON-lines objects with
-`id|query_id`, `query|question`, optional `url` and `corpus`. Batch items share
-the invocation's 24-second budget and get proportional remaining time.
-Unique IDs should be supplied; repeated/missing IDs address the same output file.
-
-`--output-dir` defaults to `/app/output`. Each question immediately gets
-`<id>_output.json` with an empty answer, empty citations and zero confidence.
-Every update uses a temporary file chmodded to 0644 before `os.replace`, so
-other UIDs can read it. Argument errors and other top-level exceptions publish
-an empty result and exit zero, recovering the ID and output directory from argv
-(including positional JSON IDs); the default ID is `query`.
-Final JSON is printed as
-one stdout line per item, matching the saved output. Additional `sources` and
-`source_url` fields mirror citations. Diagnostics go to stderr.
 
 ## Retrieval, answers and time
 
@@ -125,13 +140,13 @@ spaces while retaining units contained in the selected value.
 Run from the repository root:
 
 ```sh
-python3 -m unittest discover -s mc4/tests -v
+PYTHONDONTWRITEBYTECODE=1 X052_BACKEND=stub python3 -m unittest discover -s match4/tests -v
 ```
 
 Tests use stdlib unittest, invented fixtures and a 127.0.0.1 HTTP server.
 Subprocess guards reject heavy model imports and outbound DNS/TCP; offline
 tests additionally forbid loopback TCP and patch network entry points.
-Runtime files and test sockets live under `mc4/` and are cleaned up. The suite
+Runtime files and test sockets live under `match4/` and are cleaned up. The suite
 covers CLI aliases, JSON/JSONL inputs, index startup/reuse, multihop retrieval,
 citations, resident reuse, fallbacks, external kill survival, the parent watchdog,
 an actually sleeping stub, fetch caps, HTML cleaning and fixture leakage.
